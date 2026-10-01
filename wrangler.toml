@@ -1,0 +1,5 @@
+name = "jira-redmine-sync"
+main = "worker/index.js"
+compatibility_date = "2026-09-30"
+account_id = "f4ab17a7d9a3abd9d2c604e83efd6439"
+workers_dev = true

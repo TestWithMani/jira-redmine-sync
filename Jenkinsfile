@@ -3,8 +3,11 @@ pipeline {
     options {
         disableConcurrentBuilds()
     }
+    parameters {
+        string(name: 'ISSUE_KEY', defaultValue: '', description: 'Jira issue key, for example SUP-1472')
+    }
     stages {
-        stage('Run sync') {
+        stage('Sync one issue') {
             steps {
                 withCredentials([file(credentialsId: 'jira-redmine-env', variable: 'ENV_FILE')]) {
                     script {
@@ -12,12 +15,12 @@ pipeline {
                             sh '''
                                 cp "$ENV_FILE" .env
                                 chmod 600 .env
-                                python3 app.py
+                                python3 app.py --once "$ISSUE_KEY"
                             '''
                         } else {
                             bat '''
                                 copy /Y "%ENV_FILE%" .env
-                                python app.py
+                                python app.py --once "%ISSUE_KEY%"
                             '''
                         }
                     }

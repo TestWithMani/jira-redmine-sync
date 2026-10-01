@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from redmine_client import RedmineError
-from sync import SyncError, SyncService, adf_to_text
+from sync import Config, SyncError, SyncService, adf_to_text
 
 
 class FakeRedmine:
@@ -94,6 +94,19 @@ def service(redmine: FakeRedmine, jira=None) -> SyncService:
         jira_base_url="https://drafttemp.atlassian.net",
         jira=jira,
     )
+
+
+def _env(**overrides: str) -> dict[str, str]:
+    values = {
+        "REDMINE_URL": "https://redmine.example.com",
+        "REDMINE_API_KEY": "redmine-key",
+        "REDMINE_PROJECT": "dakota-sf",
+        "REDMINE_TRACKER_NAME": "Task",
+        "JIRA_WEBHOOK_SECRET": "secret",
+        "JIRA_PROJECT_KEYS": "sup, ABC",
+    }
+    values.update(overrides)
+    return values
 
 
 def created_payload(key="SUP-1460", project="SUP", description="Body text", summary="Add filter"):
@@ -296,6 +309,151 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(redmine.created[0]["subject"], "SUP-2000")
         self.assertEqual(second, [])
         self.assertEqual(len(redmine.created), 1)
+
+    def test_accepts_issue_created_event_name(self) -> None:
+        redmine = FakeRedmine()
+        payload = created_payload()
+        del payload["webhookEvent"]
+        payload["issue_event_type_name"] = "issue_created"
+        result = service(redmine).handle(payload)
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(redmine.created[0]["subject"], "SUP-1460")
+
+    def test_missing_issue_key_raises(self) -> None:
+        payload = created_payload()
+        del payload["issue"]["key"]
+        with self.assertRaises(SyncError):
+            service(FakeRedmine()).handle(payload)
+
+    def test_self_parent_is_rejected(self) -> None:
+        with self.assertRaises(SyncError):
+            service(FakeRedmine()).handle(subtask_payload(key="SUP-1461", parent_key="SUP-1461"))
+
+    def test_subtask_name_alone_marks_a_child(self) -> None:
+        redmine = FakeRedmine()
+        redmine.subjects["SUP-1460"] = {"id": 9, "subject": "SUP-1460"}
+        payload = subtask_payload()
+        payload["issue"]["fields"]["issuetype"] = {"name": "Sub-task", "subtask": False}
+        result = service(redmine).handle(payload)
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(redmine.created[0]["subtask"])
+        self.assertEqual(redmine.created[0]["parent_issue_id"], 9)
+
+    def test_empty_description_keeps_link_and_summary(self) -> None:
+        redmine = FakeRedmine()
+        service(redmine).handle(created_payload(description=""))
+        description = redmine.created[0]["description"]
+        self.assertEqual(
+            description,
+            "Jira: https://drafttemp.atlassian.net/browse/SUP-1460\nSummary: Add filter",
+        )
+
+    def test_parent_chain_too_deep_creates_nothing(self) -> None:
+        parent: dict = {"key": "SUP-TOP", "fields": {"summary": "top"}}
+        for number in range(10, -1, -1):
+            parent = {
+                "key": f"SUP-{number}",
+                "fields": {
+                    "summary": "nested",
+                    "project": {"key": "SUP"},
+                    "issuetype": {"name": "Sub-task", "subtask": True},
+                    "parent": parent,
+                },
+            }
+        redmine = FakeRedmine()
+        with self.assertRaises(SyncError):
+            service(redmine).handle({"webhookEvent": "jira:issue_created", "issue": parent})
+        self.assertEqual(redmine.created, [])
+
+    def test_poll_creates_parent_before_child(self) -> None:
+        class ReversedSearch:
+            def search_created(self, project_keys, lookback_days):
+                self.project_keys = project_keys
+                self.lookback_days = lookback_days
+                return [
+                    {
+                        "key": "SUP-2",
+                        "fields": {
+                            "summary": "Child",
+                            "description": "child",
+                            "created": "2026-09-30T13:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Sub-task", "subtask": True},
+                            "parent": {"key": "SUP-1", "fields": {"summary": "Parent"}},
+                        },
+                    },
+                    {
+                        "key": "SUP-1",
+                        "fields": {
+                            "summary": "Parent",
+                            "description": "parent",
+                            "created": "2026-09-30T12:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                ]
+
+        redmine = FakeRedmine()
+        jira = ReversedSearch()
+        seen = Path(__file__).resolve().parent / "_seen_order.txt"
+        self.addCleanup(lambda: seen.unlink(missing_ok=True))
+        results = service(redmine).poll_recent(jira, 2, seen)
+        self.assertEqual(jira.project_keys, ["SUP"])
+        self.assertEqual(jira.lookback_days, 2)
+        self.assertEqual([issue["subject"] for issue in redmine.created], ["SUP-1", "SUP-2"])
+        self.assertEqual(redmine.created[1]["parent_issue_id"], redmine.created[0]["id"])
+        self.assertEqual([item["jiraKey"] for item in results], ["SUP-1", "SUP-2"])
+
+    def test_poll_remembers_only_issues_synced_before_a_failure(self) -> None:
+        class FailSecond(FakeRedmine):
+            def create_issue(self, subject, description, parent_issue_id=None, subtask=False):
+                if subject == "SUP-2":
+                    raise RedmineError("second failed", status=500)
+                return super().create_issue(subject, description, parent_issue_id, subtask)
+
+        class TwoIssues:
+            def search_created(self, project_keys, lookback_days):
+                return [
+                    {
+                        "key": "SUP-1",
+                        "fields": {
+                            "summary": "First",
+                            "description": "one",
+                            "created": "2026-09-30T12:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                    {
+                        "key": "SUP-2",
+                        "fields": {
+                            "summary": "Second",
+                            "description": "two",
+                            "created": "2026-09-30T13:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                ]
+
+        redmine = FailSecond()
+        seen = Path(__file__).resolve().parent / "_seen_fail.txt"
+        self.addCleanup(lambda: seen.unlink(missing_ok=True))
+        with self.assertRaises(RedmineError):
+            service(redmine).poll_recent(TwoIssues(), 2, seen)
+        self.assertEqual([issue["subject"] for issue in redmine.created], ["SUP-1"])
+        self.assertEqual(seen.read_text(encoding="utf-8").split(), ["SUP-1"])
+
+    def test_config_requires_settings_and_a_project_key(self) -> None:
+        with self.assertRaises(SyncError):
+            Config.from_env({})
+        with self.assertRaises(SyncError):
+            Config.from_env(_env(JIRA_PROJECT_KEYS=" , "))
+        config = Config.from_env(_env())
+        self.assertEqual(config.jira_project_keys, {"SUP", "ABC"})
+        self.assertIsNone(config.jira_email)
+        self.assertIsNone(config.jira_api_token)
 
     def test_adf_description_flattens_to_text(self) -> None:
         text = adf_to_text(

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import handle_webhook_request, verify_webhook_secret
+from app import handle_webhook_request, sync_once, verify_webhook_secret
 from redmine_client import RedmineError
 from sync import SyncError
 
@@ -74,6 +74,49 @@ class AppTests(unittest.TestCase):
             failing, SECRET, body, signed(body)
         )
         self.assertEqual(status, 500)
+
+        status, payload = handle_webhook_request(
+            service, SECRET, b"[]", {"X-Webhook-Secret": SECRET}
+        )
+        self.assertEqual(status, 400)
+
+        failing = StubService(error=RuntimeError("unexpected"))
+        status, payload = handle_webhook_request(
+            failing, SECRET, body, {"X-Webhook-Secret": SECRET}
+        )
+        self.assertEqual(status, 500)
+        self.assertEqual(payload, {"error": "sync_failed"})
+
+    def test_sync_once_fetches_the_issue_and_handles_create(self) -> None:
+        class FakeJira:
+            def get_issue(self, key):
+                self.key = key
+                return {"key": key, "fields": {"summary": "One"}}
+
+        service = StubService()
+        service.jira = FakeJira()
+        result = sync_once(service, "sup-1472")
+        self.assertEqual(service.jira.key, "SUP-1472")
+        self.assertEqual(service.payloads[0]["webhookEvent"], "jira:issue_created")
+        self.assertEqual(service.payloads[0]["issue"]["key"], "SUP-1472")
+        self.assertEqual(result["jiraKey"], "SUP-1460")
+
+    def test_sync_once_requires_a_jira_client_and_a_real_key(self) -> None:
+        service = StubService()
+        service.jira = None
+        with self.assertRaises(SyncError):
+            sync_once(service, "SUP-1472")
+        service.jira = object()
+        with self.assertRaises(SyncError):
+            sync_once(service, "not-a-key")
+
+    def test_signature_256_header_is_accepted(self) -> None:
+        body = b'{"webhookEvent":"jira:issue_created"}'
+        digest = hmac.new(SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        self.assertTrue(
+            verify_webhook_secret(SECRET, body, {"X-Hub-Signature-256": f"sha256={digest}"})
+        )
+        self.assertFalse(verify_webhook_secret(SECRET, body, {"X-Hub-Signature": "sha256=abc"}))
 
 
 if __name__ == "__main__":

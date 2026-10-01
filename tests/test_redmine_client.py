@@ -154,6 +154,106 @@ class RedmineClientTests(unittest.TestCase):
             redmine.create_issue("SUP-1460", "desc")
         self.assertEqual(caught.exception.status, 422)
 
+    def test_accepts_closed_issue_with_exact_subject(self) -> None:
+        def search(query, body):
+            return 200, {
+                "results": [{"id": 18, "title": "Task #18 (Closed): SUP-1460", "type": "issue-closed"}],
+                "total_count": 1,
+            }
+
+        def issue(query, body):
+            return 200, {
+                "issue": {"id": 18, "subject": "SUP-1460", "project": {"id": 7}},
+            }
+
+        redmine, _transport = client(
+            {
+                ("GET", "/projects/support.json"): project_route,
+                ("GET", "/projects/support/search.json"): search,
+                ("GET", "/issues/18.json"): issue,
+            }
+        )
+        self.assertEqual(redmine.find_by_subject("SUP-1460")["id"], 18)
+
+    def test_ignores_same_subject_in_another_project(self) -> None:
+        def search(query, body):
+            return 200, {
+                "results": [{"id": 19, "title": "SUP-1460", "type": "issue"}],
+                "total_count": 1,
+            }
+
+        def issue(query, body):
+            return 200, {
+                "issue": {"id": 19, "subject": "SUP-1460", "project": {"id": 99}},
+            }
+
+        redmine, _transport = client(
+            {
+                ("GET", "/projects/support.json"): project_route,
+                ("GET", "/projects/support/search.json"): search,
+                ("GET", "/issues/19.json"): issue,
+            }
+        )
+        self.assertIsNone(redmine.find_by_subject("SUP-1460"))
+
+    def test_tracker_name_match_is_case_insensitive(self) -> None:
+        def create(query, body):
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(payload["issue"]["tracker_id"], 3)
+            return 201, {"issue": {"id": 20, "subject": "SUP-1460"}}
+
+        redmine, _transport = client(
+            {
+                ("GET", "/projects/support.json"): project_route,
+                ("POST", "/issues.json"): create,
+            }
+        )
+        redmine.tracker_name = "support"
+        self.assertEqual(redmine.create_issue("SUP-1460", "desc")["id"], 20)
+
+    def test_missing_tracker_raises(self) -> None:
+        redmine, _transport = client({("GET", "/projects/support.json"): project_route})
+        redmine.tracker_name = "Bug"
+        with self.assertRaises(RedmineError):
+            redmine.create_issue("SUP-1460", "desc")
+
+    def test_search_reads_the_next_page(self) -> None:
+        def search(query, body):
+            offset = query["offset"][0]
+            if offset == "0":
+                return 200, {
+                    "results": [{"id": 21, "title": "Notes about SUP-1460", "type": "issue"}],
+                    "total_count": 26,
+                }
+            self.assertEqual(offset, "25")
+            return 200, {
+                "results": [{"id": 22, "title": "SUP-1460", "type": "issue"}],
+                "total_count": 26,
+            }
+
+        routes_issue_ids = {"count": 0}
+
+        def issue_by_url(query, body):
+            routes_issue_ids["count"] += 1
+            if routes_issue_ids["count"] == 1:
+                return 200, {
+                    "issue": {"id": 21, "subject": "Notes about SUP-1460", "project": {"id": 7}},
+                }
+            return 200, {"issue": {"id": 22, "subject": "SUP-1460", "project": {"id": 7}}}
+
+        redmine, transport = client(
+            {
+                ("GET", "/projects/support.json"): project_route,
+                ("GET", "/projects/support/search.json"): search,
+                ("GET", "/issues/21.json"): issue_by_url,
+                ("GET", "/issues/22.json"): issue_by_url,
+            }
+        )
+        self.assertEqual(redmine.find_by_subject("SUP-1460")["id"], 22)
+        paths = [urlparse(url).path for _method, url in transport.calls]
+        self.assertIn("/issues/21.json", paths)
+        self.assertIn("/issues/22.json", paths)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-"""HTTP webhook that creates Redmine issues when Jira issues are created."""
+"""Creates Redmine issues for new Jira issues, by polling Jira or by webhook."""
 
 from __future__ import annotations
 
@@ -70,6 +70,17 @@ def handle_webhook_request(
         return 500, {"error": "sync_failed"}
 
 
+def sync_once(service: SyncService, issue_key: str) -> dict[str, Any]:
+    """Fetch one Jira issue and create the Redmine issue if it is missing."""
+    key = issue_key.strip().upper()
+    if not _issue_key(key):
+        raise SyncError("Usage: python app.py --once SUP-1472")
+    if service.jira is None:
+        raise SyncError("JIRA_EMAIL and JIRA_API_TOKEN are required to sync one issue")
+    issue = service.jira.get_issue(key)
+    return service.handle({"webhookEvent": "jira:issue_created", "issue": issue})
+
+
 def build_service(config: Config) -> SyncService:
     redmine = RedmineClient(
         base_url=config.redmine_url,
@@ -127,7 +138,7 @@ def make_handler(service: SyncService, secret: str) -> type[BaseHTTPRequestHandl
     return Handler
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     root = Path(__file__).resolve().parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -144,6 +155,19 @@ def main() -> None:
     file_handler = logging.FileHandler(run_dir / "service.log", encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger().addHandler(file_handler)
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--once"]:
+        if len(args) != 2:
+            LOG.error("Usage: python app.py --once SUP-1472")
+            raise SystemExit(2)
+        try:
+            result = sync_once(service, args[1])
+        except (SyncError, RedmineError) as exc:
+            LOG.error("%s", exc)
+            raise SystemExit(1) from exc
+        LOG.info("once %s %s", result.get("jiraKey"), result.get("action"))
+        print(json.dumps(result))
+        return
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8765"))
     if config.jira_email and config.jira_api_token:
@@ -175,6 +199,11 @@ def _poll_loop(service: SyncService, interval: int, lookback: int, seen_path: Pa
         except Exception:
             LOG.exception("Jira poll failed")
         time.sleep(max(interval, 15))
+
+
+def _issue_key(value: str) -> bool:
+    project, separator, number = value.partition("-")
+    return bool(separator and project.isalnum() and number.isdigit())
 
 
 def _header(headers: Any, name: str) -> str:

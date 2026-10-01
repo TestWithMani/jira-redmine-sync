@@ -1,4 +1,4 @@
-"""Create Redmine issues from Jira issue-created webhooks."""
+"""Create Redmine issues for new Jira issues."""
 
 from __future__ import annotations
 
