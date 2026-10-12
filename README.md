@@ -23,7 +23,7 @@ Edit `.env` locally. Do not commit it.
 | `REDMINE_TRACKER_NAME` | Tracker enabled on that project |
 | `REDMINE_SUBTASK_TRACKER_NAME` | Optional. Defaults to `REDMINE_TRACKER_NAME` |
 | `JIRA_WEBHOOK_SECRET` | Shared secret for `POST /webhooks/jira` |
-| `JIRA_PROJECT_KEYS` | Comma-separated keys. Default `SUP` |
+| `JIRA_PROJECT_KEYS` | Comma-separated keys. Default `SUP,MC,DSC,DPS` |
 | `JIRA_BASE_URL` | Used in the Redmine description link |
 | `JIRA_EMAIL` | Atlassian account that can read the project |
 | `JIRA_API_TOKEN` | API token for that account. Turns polling on |
@@ -60,7 +60,7 @@ Jira Cloud only accepts an `https://` webhook URL. A Cloudflare Worker at `worke
 1. Open `https://drafttemp.atlassian.net`.
 2. Settings (gear), System, WebHooks.
 3. URL: `https://<worker>.workers.dev`
-4. Scope: Issue, created. JQL: `project = SUP`
+4. Scope: Issue, created. JQL: `project in (SUP, MC, DSC, DPS)`
 5. Set the secret to `JIRA_WEBHOOK_SECRET`. Jira signs the body in `X-Hub-Signature` (`sha256=<hmac>`). A caller can also send header `X-Webhook-Secret`.
 
 Requests with a missing or wrong secret get `401`. Redmine errors get `500` so a delivery can be retried. A retry is safe: the subject lookup skips issues that were already created.

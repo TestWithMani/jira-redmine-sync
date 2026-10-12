@@ -41,7 +41,7 @@ class Config:
     def from_env(cls, env: dict[str, str]) -> "Config":
         project_keys = {
             key.strip().upper()
-            for key in env.get("JIRA_PROJECT_KEYS", "SUP").split(",")
+            for key in env.get("JIRA_PROJECT_KEYS", "SUP,MC,DSC,DPS").split(",")
             if key.strip()
         }
         missing = [

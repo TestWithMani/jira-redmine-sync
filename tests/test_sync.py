@@ -445,6 +445,28 @@ class SyncTests(unittest.TestCase):
         self.assertEqual([issue["subject"] for issue in redmine.created], ["SUP-1"])
         self.assertEqual(seen.read_text(encoding="utf-8").split(), ["SUP-1"])
 
+    def test_mc_dsc_and_dps_issues_are_created(self) -> None:
+        redmine = FakeRedmine()
+        sync = SyncService(
+            redmine=redmine,
+            project_keys={"SUP", "MC", "DSC", "DPS"},
+            jira_base_url="https://drafttemp.atlassian.net",
+        )
+        for key, project in (("MC-10", "MC"), ("DSC-11", "DSC"), ("DPS-12", "DPS")):
+            result = sync.handle(created_payload(key=key, project=project, summary=key))
+            self.assertEqual(result["action"], "created")
+            self.assertEqual(result["jiraKey"], key)
+        ignored = sync.handle(created_payload(key="ZZ-1", project="ZZ"))
+        self.assertEqual(ignored["action"], "ignored")
+        self.assertEqual(ignored["reason"], "project")
+        self.assertEqual([issue["subject"] for issue in redmine.created], ["MC-10", "DSC-11", "DPS-12"])
+
+    def test_default_project_keys_cover_the_watched_boards(self) -> None:
+        env = _env()
+        del env["JIRA_PROJECT_KEYS"]
+        config = Config.from_env(env)
+        self.assertEqual(config.jira_project_keys, {"SUP", "MC", "DSC", "DPS"})
+
     def test_config_requires_settings_and_a_project_key(self) -> None:
         with self.assertRaises(SyncError):
             Config.from_env({})
