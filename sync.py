@@ -230,6 +230,65 @@ class SyncService:
             results.append(result)
         return results
 
+    def reconcile_missing(self, jira: JiraClient, lookback_days: int) -> dict[str, Any]:
+        """Create Redmine issues for any Jira keys in the lookback window that are still missing.
+
+        Uses Redmine subject lookup as the source of truth (not seen-keys.txt).
+        Continues after individual failures and reports them in the summary.
+        """
+        issues = jira.search_created(sorted(self.project_keys), lookback_days)
+        issues.sort(key=_reconcile_sort_key)
+        summary: dict[str, Any] = {
+            "action": "reconcile",
+            "scanned": 0,
+            "created": 0,
+            "skipped": 0,
+            "failed": 0,
+            "createdKeys": [],
+            "skippedKeys": [],
+            "failedKeys": [],
+            "results": [],
+        }
+        for issue in issues:
+            key = str(issue.get("key") or "")
+            if not key:
+                continue
+            summary["scanned"] += 1
+            try:
+                existing = self.redmine.find_by_subject(key)
+                if existing:
+                    result = _result(
+                        action="skipped",
+                        reason="duplicate",
+                        jira_key=key,
+                        redmine_id=existing.get("id"),
+                    )
+                else:
+                    result = self.handle({"webhookEvent": "jira:issue_created", "issue": issue})
+            except (SyncError, RedmineError) as exc:
+                logger.exception("reconcile failed for %s: %s", key, exc)
+                summary["failed"] += 1
+                summary["failedKeys"].append(key)
+                summary["results"].append(
+                    {
+                        "action": "failed",
+                        "reason": str(exc),
+                        "jiraKey": key,
+                        "redmineId": None,
+                        "parentRedmineId": None,
+                        "parentCreated": False,
+                    }
+                )
+                continue
+            summary["results"].append(result)
+            if result.get("action") == "created":
+                summary["created"] += 1
+                summary["createdKeys"].append(key)
+            else:
+                summary["skipped"] += 1
+                summary["skippedKeys"].append(key)
+        return summary
+
     def _ensure(
         self,
         issue: dict[str, Any],
@@ -383,6 +442,12 @@ def _is_subtask(issue: dict[str, Any]) -> bool:
         return True
     name = str(issue_type.get("name") or "").strip().lower().replace("-", "").replace(" ", "")
     return name == "subtask"
+
+
+def _reconcile_sort_key(issue: dict[str, Any]) -> tuple[int, str]:
+    """Process normal issues before subtasks, then by created timestamp."""
+    created = str((issue.get("fields") or {}).get("created") or "")
+    return (1 if _is_subtask(issue) else 0, created)
 
 
 def _result(

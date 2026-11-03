@@ -506,6 +506,131 @@ class SyncTests(unittest.TestCase):
         self.assertIn("Hello", text)
         self.assertIn("- One", text)
 
+    def test_reconcile_creates_missing_and_skips_existing(self) -> None:
+        class TwoIssues:
+            def search_created(self, project_keys, lookback_days):
+                self.lookback_days = lookback_days
+                return [
+                    {
+                        "key": "SUP-1",
+                        "fields": {
+                            "summary": "Exists",
+                            "description": "one",
+                            "created": "2026-09-30T12:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                    {
+                        "key": "SUP-2",
+                        "fields": {
+                            "summary": "Missing",
+                            "description": "two",
+                            "created": "2026-09-30T13:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                ]
+
+        redmine = FakeRedmine()
+        redmine.subjects["SUP-1"] = {"id": 11, "subject": "SUP-1"}
+        jira = TwoIssues()
+        summary = service(redmine).reconcile_missing(jira, 7)
+        self.assertEqual(jira.lookback_days, 7)
+        self.assertEqual(summary["action"], "reconcile")
+        self.assertEqual(summary["scanned"], 2)
+        self.assertEqual(summary["created"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["createdKeys"], ["SUP-2"])
+        self.assertEqual(summary["skippedKeys"], ["SUP-1"])
+        self.assertEqual([issue["subject"] for issue in redmine.created], ["SUP-2"])
+
+    def test_reconcile_ignores_seen_keys_file_and_uses_redmine(self) -> None:
+        """A key recorded as seen must still be created when Redmine has no subject."""
+        redmine = FakeRedmine()
+        jira = FakeSearch()
+        seen = Path(__file__).resolve().parent / "_seen_reconcile.txt"
+        seen.write_text("SUP-2000\n", encoding="utf-8")
+        self.addCleanup(lambda: seen.unlink(missing_ok=True))
+        summary = service(redmine).reconcile_missing(jira, 7)
+        self.assertEqual(summary["createdKeys"], ["SUP-2000"])
+        self.assertEqual(redmine.created[0]["subject"], "SUP-2000")
+        self.assertEqual(seen.read_text(encoding="utf-8"), "SUP-2000\n")
+
+    def test_reconcile_continues_after_a_failure(self) -> None:
+        class FailFirst(FakeRedmine):
+            def create_issue(self, subject, description, parent_issue_id=None, subtask=False):
+                if subject == "SUP-1":
+                    raise RedmineError("first failed", status=500)
+                return super().create_issue(subject, description, parent_issue_id, subtask)
+
+        class TwoIssues:
+            def search_created(self, project_keys, lookback_days):
+                return [
+                    {
+                        "key": "SUP-1",
+                        "fields": {
+                            "summary": "First",
+                            "description": "one",
+                            "created": "2026-09-30T12:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                    {
+                        "key": "SUP-2",
+                        "fields": {
+                            "summary": "Second",
+                            "description": "two",
+                            "created": "2026-09-30T13:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                ]
+
+        summary = service(FailFirst()).reconcile_missing(TwoIssues(), 7)
+        self.assertEqual(summary["scanned"], 2)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["created"], 1)
+        self.assertEqual(summary["failedKeys"], ["SUP-1"])
+        self.assertEqual(summary["createdKeys"], ["SUP-2"])
+
+    def test_reconcile_processes_parents_before_subtasks(self) -> None:
+        class ChildFirst:
+            def search_created(self, project_keys, lookback_days):
+                return [
+                    {
+                        "key": "SUP-2",
+                        "fields": {
+                            "summary": "Child",
+                            "description": "child",
+                            "created": "2026-09-30T11:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Sub-task", "subtask": True},
+                            "parent": {"key": "SUP-1", "fields": {"summary": "Parent"}},
+                        },
+                    },
+                    {
+                        "key": "SUP-1",
+                        "fields": {
+                            "summary": "Parent",
+                            "description": "parent",
+                            "created": "2026-09-30T14:00:00.000-0400",
+                            "project": {"key": "SUP"},
+                            "issuetype": {"name": "Task", "subtask": False},
+                        },
+                    },
+                ]
+
+        redmine = FakeRedmine()
+        summary = service(redmine).reconcile_missing(ChildFirst(), 7)
+        self.assertEqual([issue["subject"] for issue in redmine.created], ["SUP-1", "SUP-2"])
+        self.assertEqual(redmine.created[1]["parent_issue_id"], redmine.created[0]["id"])
+        self.assertEqual(summary["createdKeys"], ["SUP-1", "SUP-2"])
+
 
 if __name__ == "__main__":
     unittest.main()

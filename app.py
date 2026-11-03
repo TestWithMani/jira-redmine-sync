@@ -81,6 +81,15 @@ def sync_once(service: SyncService, issue_key: str) -> dict[str, Any]:
     return service.handle({"webhookEvent": "jira:issue_created", "issue": issue})
 
 
+def reconcile(service: SyncService, lookback_days: int) -> dict[str, Any]:
+    """Create Redmine issues for Jira keys in the lookback window that are still missing."""
+    if service.jira is None:
+        raise SyncError("JIRA_EMAIL and JIRA_API_TOKEN are required to reconcile")
+    if lookback_days < 1:
+        raise SyncError("RECONCILE_LOOKBACK_DAYS must be at least 1")
+    return service.reconcile_missing(service.jira, lookback_days)
+
+
 def build_service(config: Config) -> SyncService:
     redmine = RedmineClient(
         base_url=config.redmine_url,
@@ -167,6 +176,27 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(1) from exc
         LOG.info("once %s %s", result.get("jiraKey"), result.get("action"))
         print(json.dumps(result))
+        return
+    if args[:1] == ["--reconcile"]:
+        if len(args) != 1:
+            LOG.error("Usage: python app.py --reconcile")
+            raise SystemExit(2)
+        lookback = int(os.environ.get("RECONCILE_LOOKBACK_DAYS", "7"))
+        try:
+            summary = reconcile(service, lookback)
+        except (SyncError, RedmineError) as exc:
+            LOG.error("%s", exc)
+            raise SystemExit(1) from exc
+        LOG.info(
+            "reconcile scanned=%s created=%s skipped=%s failed=%s",
+            summary.get("scanned"),
+            summary.get("created"),
+            summary.get("skipped"),
+            summary.get("failed"),
+        )
+        print(json.dumps(summary))
+        if summary.get("failed"):
+            raise SystemExit(1)
         return
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8765"))

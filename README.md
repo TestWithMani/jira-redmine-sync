@@ -26,9 +26,10 @@ Edit `.env` locally. Do not commit it.
 | `JIRA_PROJECT_KEYS` | Comma-separated keys. Default `SUP,MC,DSC,DPS` |
 | `JIRA_BASE_URL` | Used in the Redmine description link |
 | `JIRA_EMAIL` | Atlassian account that can read the project |
-| `JIRA_API_TOKEN` | API token for that account. Turns polling on |
+| `JIRA_API_TOKEN` | API token for that account. Turns polling and `--reconcile` / `--once` on |
 | `POLL_INTERVAL_SECONDS` | How often to ask Jira. Default `60` |
 | `POLL_LOOKBACK_DAYS` | How far back a poll looks. Default `2` |
+| `RECONCILE_LOOKBACK_DAYS` | How far back `--reconcile` looks. Default `7` |
 | `HOST` / `PORT` | Bind address. Default `127.0.0.1:8765` |
 
 Redmine needs the REST API enabled (Administration, Settings, API).
@@ -45,13 +46,26 @@ With `JIRA_EMAIL` and `JIRA_API_TOKEN` set, one issue can be synced and the proc
 python app.py --once SUP-1472
 ```
 
-The same settings also turn on a 60-second poll when `app.py` is started with no arguments. A key is remembered after a successful poll, so the next poll skips it. Tickets older than the lookback window are left alone.
+To find Jira issues from the last `RECONCILE_LOOKBACK_DAYS` (default 7) that are still missing in Redmine and create them:
+
+```powershell
+python app.py --reconcile
+```
+
+Reconcile checks Redmine by exact subject (the Jira key). It does not use `.run/seen-keys.txt`. It prints a JSON summary with `scanned`, `created`, `skipped`, and `failed` counts, and exits non-zero if any create failed.
+
+The same Jira settings also turn on a 60-second poll when `app.py` is started with no arguments. A key is remembered after a successful poll, so the next poll skips it. Tickets older than the lookback window are left alone. Prefer `--reconcile` (or the Jenkins cron) to recover missed webhook creates.
 
 ## Jenkins
 
-This folder is the whole app. On the Jenkins server, create a **Secret file** credential with ID `jira-redmine-env`. The file is a `.env` like `.env.example`.
+This folder is the whole app. On the Jenkins server, create a **Secret file** credential with ID `jira-redmine-env`. The file is a `.env` like `.env.example`. Keep `JIRA_EMAIL` and `JIRA_API_TOKEN` in that secret so `--once` and `--reconcile` can call Jira.
 
-Create a Pipeline job from this repo and use the `Jenkinsfile`. A build takes `ISSUE_KEY`, runs `python app.py --once`, and exits. `disableConcurrentBuilds` keeps two creates from running at the same time.
+Create a Pipeline job from this repo and use the `Jenkinsfile`.
+
+- Non-empty `ISSUE_KEY` → `python app.py --once` (webhook / manual one-shot)
+- Empty `ISSUE_KEY` → `python app.py --reconcile` (catch-up for missing Redmine subjects)
+- Cron `H */4 * * *` runs about every four hours with an empty `ISSUE_KEY`, so missed creates are backfilled
+- `disableConcurrentBuilds` keeps webhook creates and reconcile from overlapping
 
 ## Jira webhook
 

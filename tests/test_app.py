@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import handle_webhook_request, sync_once, verify_webhook_secret
+from app import handle_webhook_request, reconcile, sync_once, verify_webhook_secret
 from redmine_client import RedmineError
 from sync import SyncError
 
@@ -109,6 +109,26 @@ class AppTests(unittest.TestCase):
         service.jira = object()
         with self.assertRaises(SyncError):
             sync_once(service, "not-a-key")
+
+    def test_reconcile_requires_jira_and_positive_lookback(self) -> None:
+        service = StubService()
+        service.jira = None
+        with self.assertRaises(SyncError):
+            reconcile(service, 7)
+
+        class StubReconcile:
+            jira = object()
+
+            def reconcile_missing(self, jira, lookback_days):
+                self.lookback_days = lookback_days
+                return {"action": "reconcile", "failed": 0}
+
+        ready = StubReconcile()
+        with self.assertRaises(SyncError):
+            reconcile(ready, 0)
+        summary = reconcile(ready, 7)
+        self.assertEqual(ready.lookback_days, 7)
+        self.assertEqual(summary["action"], "reconcile")
 
     def test_signature_256_header_is_accepted(self) -> None:
         body = b'{"webhookEvent":"jira:issue_created"}'
